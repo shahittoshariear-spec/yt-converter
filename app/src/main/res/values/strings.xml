@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">YT Converter</string>
+
+    <string name="url_label">Video link</string>
+    <string name="url_placeholder">https://youtube.com/watch?v=…</string>
+    <string name="paste">Paste</string>
+    <string name="clear">Clear</string>
+
+    <string name="format_title">Audio format</string>
+    <string name="format_mp3">MP3</string>
+    <string name="format_flac">FLAC</string>
+    <string name="format_original">Original</string>
+
+    <string name="format_mp3_note">Re-encoded to a constant 320 kbps MP3. Plays everywhere.</string>
+    <string name="format_flac_note">Decoded into a lossless FLAC container. The largest file.</string>
+    <string name="format_original_note">Best available audio, left untouched. The highest real quality.</string>
+
+    <string name="convert">Convert &amp; download</string>
+    <string name="converting">Converting…</string>
+    <string name="downloading">Downloading…</string>
+    <string name="cancel">Cancel</string>
+
+    <string name="recent">Downloads</string>
+    <string name="clear_all">Clear all</string>
+    <string name="empty_title">Nothing here yet</string>
+    <string name="empty_body">Paste a link above, pick a format, and your audio lands in the Music folder.</string>
+
+    <string name="settings">Settings</string>
+    <string name="settings_folder">Save to</string>
+    <string name="settings_folder_help">Files are written into this folder under Music.</string>
+    <string name="settings_engine">Extraction engine</string>
+    <string name="settings_engine_help">YouTube changes often. Update yt-dlp if downloads start failing.</string>
+    <string name="settings_engine_update">Update engine</string>
+    <string name="settings_close">Close</string>
+    <string name="engine_updating">Updating…</string>
+    <string name="engine_updated">Updated to the latest engine</string>
+    <string name="engine_failed">Update failed — check your connection</string>
+
+    <string name="saved_to">Saved to Music/%1$s</string>
+    <string name="removed">Removed</string>
+    <string name="notif_channel_name">Downloads</string>
+    <string name="notif_channel_desc">Progress for video conversions</string>
+    <string name="notif_done">Saved to your Music folder</string>
+    <string name="notif_failed">Conversion failed</string>
+
+    <string name="share">Share</string>
+    <string name="delete">Delete</string>
+    <string name="open">Play</string>
+    <string name="more">More options</string>
+
+    <string name="engine_setup">Preparing engine…</string>
+    <string name="bad_url">That does not look like a video link</string>
+    <string name="busy">Another conversion is already running</string>
+</resources>

@@ -1,0 +1,11 @@
+# Normalise line endings so the Gradle wrapper keeps working on Linux and macOS.
+# Without eol=lf, a Windows checkout writes CRLF into `gradlew` and the shebang breaks.
+* text=auto
+gradlew text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+
+*.jar binary
+*.png binary
+*.jks binary
+*.keystore binary
