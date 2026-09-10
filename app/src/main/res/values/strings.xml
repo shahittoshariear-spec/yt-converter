@@ -2,8 +2,13 @@
 <resources>
     <string name="app_name">YT Converter</string>
 
+    <string name="signature">Shariear.S</string>
+    <string name="about_title">About</string>
+    <string name="about_credit">Made by Shariear.S</string>
+    <string name="about_blurb">Built at home, for my family.</string>
+
     <string name="url_label">Video link</string>
-    <string name="url_placeholder">https://youtube.com/watch?v=…</string>
+    <string name="url_placeholder">Paste a link, or several</string>
     <string name="paste">Paste</string>
     <string name="clear">Clear</string>
 
@@ -18,8 +23,27 @@
 
     <string name="convert">Convert &amp; download</string>
     <string name="converting">Converting…</string>
+    <string name="preparing">Reading link…</string>
     <string name="downloading">Downloading…</string>
     <string name="cancel">Cancel</string>
+
+    <string name="playlist_add">Also add the whole playlist</string>
+
+    <string name="queue_title">Queue</string>
+    <string name="queue_clear_finished">Clear finished</string>
+    <string name="queue_cancel_all">Cancel all</string>
+    <string name="retry">Retry</string>
+    <string name="remove">Remove</string>
+
+    <string name="status_queued">Waiting…</string>
+    <string name="status_running">Working…</string>
+    <string name="status_done">Done</string>
+    <string name="status_failed">Failed</string>
+    <string name="status_canceled">Canceled</string>
+
+    <string name="phase_repairing">Engine out of date — updating…</string>
+    <string name="engine_repaired">Engine updated, retrying</string>
+    <string name="engine_repair_failed">Could not update the engine</string>
 
     <string name="recent">Downloads</string>
     <string name="clear_all">Clear all</string>
@@ -29,8 +53,10 @@
     <string name="settings">Settings</string>
     <string name="settings_folder">Save to</string>
     <string name="settings_folder_help">Files are written into this folder under Music.</string>
+    <string name="settings_sponsorblock">Trim intros and sponsor reads</string>
+    <string name="settings_sponsorblock_help">Uses SponsorBlock to cut non-music sections out of the audio.</string>
     <string name="settings_engine">Extraction engine</string>
-    <string name="settings_engine_help">YouTube changes often. Update yt-dlp if downloads start failing.</string>
+    <string name="settings_engine_help">YouTube changes often. The app updates yt-dlp by itself when a download looks broken.</string>
     <string name="settings_engine_update">Update engine</string>
     <string name="settings_close">Close</string>
     <string name="engine_updating">Updating…</string>
@@ -43,6 +69,9 @@
     <string name="notif_channel_desc">Progress for video conversions</string>
     <string name="notif_done">Saved to your Music folder</string>
     <string name="notif_failed">Conversion failed</string>
+    <string name="notif_of">%1$d of %2$d</string>
+    <string name="summary_saved">%1$d file(s) saved to Music</string>
+    <string name="summary_mixed">%1$d saved, %2$d failed</string>
 
     <string name="share">Share</string>
     <string name="delete">Delete</string>
@@ -51,5 +80,13 @@
 
     <string name="engine_setup">Preparing engine…</string>
     <string name="bad_url">That does not look like a video link</string>
-    <string name="busy">Another conversion is already running</string>
+    <string name="no_links">No link found on the clipboard</string>
+    <string name="enqueued_one">Added to the queue</string>
+    <string name="enqueued_many">%1$d links added to the queue</string>
+    <string name="playlist_expanding">Reading playlist…</string>
+
+    <string name="err_age_restricted">Needs a signed-in account — this video is age-restricted</string>
+    <string name="err_stale_engine">YouTube changed its player. Update the engine in Settings and retry.</string>
+    <string name="err_network">Network problem — check your connection</string>
+    <string name="err_unavailable">This video is unavailable</string>
 </resources>

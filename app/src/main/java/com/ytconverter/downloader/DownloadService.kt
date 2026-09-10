@@ -7,7 +7,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -15,7 +14,6 @@ import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.ytconverter.MainActivity
 import com.ytconverter.R
-import com.ytconverter.data.AudioFormat
 import com.ytconverter.data.DownloadRecord
 import com.ytconverter.data.HistoryRepository
 import com.ytconverter.data.SettingsRepository
@@ -25,22 +23,31 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
-import java.util.UUID
 import kotlin.math.roundToInt
 
 /**
- * Runs one conversion at a time as a foreground service, so it survives the app being
- * backgrounded or the screen turning off.
+ * Drains [DownloadBus] one item at a time as a foreground service, so conversions
+ * survive the app being backgrounded or the screen turning off.
  */
 class DownloadService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var work: Job? = null
+    private val workerLock = Any()
+    private var worker: Job? = null
 
     @Volatile
-    private var lastNotifiedBucket = Int.MIN_VALUE
+    private var lastStartId = 0
+
+    @Volatile
+    private var lastNotificationKey: String? = null
+
+    /** Cancel asked for while the item was between yt-dlp invocations. */
+    private class UserCanceledException : Exception()
+
+    private class JobFailure(val kind: FailureKind, message: String?) : Exception(message)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -50,37 +57,25 @@ class DownloadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
+
         when (intent?.action) {
-            ACTION_CANCEL -> {
-                DownloadBus.cancel()
+            ACTION_CANCEL_CURRENT -> {
+                DownloadBus.cancelCurrent()
                 return START_NOT_STICKY
             }
 
-            ACTION_START -> {
-                val url = intent.getStringExtra(EXTRA_URL)
-                val format = intent.getStringExtra(EXTRA_FORMAT)
-                    ?.let { runCatching { AudioFormat.valueOf(it) }.getOrNull() }
-                    ?: AudioFormat.MP3
-                val probe = ProbeInfo(
-                    title = intent.getStringExtra(EXTRA_TITLE) ?: url.orEmpty(),
-                    uploader = intent.getStringExtra(EXTRA_UPLOADER),
-                    thumbnailUrl = intent.getStringExtra(EXTRA_THUMBNAIL),
-                    durationSeconds = intent.getLongExtra(EXTRA_DURATION, 0L),
-                )
-
-                // Started as a foreground service, so a notification is owed either way.
+            ACTION_ENQUEUE -> {
+                // Started as a foreground service, so a notification is owed promptly.
                 startForeground(
                     NOTIFICATION_PROGRESS,
-                    buildProgressNotification(probe.title, -1f, null),
+                    buildProgressNotification(
+                        getString(R.string.app_name),
+                        -1f,
+                        getString(R.string.engine_setup),
+                    ),
                 )
-
-                if (url.isNullOrBlank() || work?.isActive == true) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                    return START_NOT_STICKY
-                }
-
-                work = scope.launch { convert(url, format, probe) }
+                ensureWorker()
             }
         }
         return START_NOT_STICKY
@@ -91,200 +86,355 @@ class DownloadService : Service() {
         super.onDestroy()
     }
 
-    private suspend fun convert(url: String, format: AudioFormat, probe: ProbeInfo) {
+    private fun ensureWorker() {
+        synchronized(workerLock) {
+            if (worker?.isActive == true) return
+            worker = scope.launch { drain() }
+        }
+    }
+
+    private suspend fun drain() {
+        // Ids handled by this run, so the summary reports this batch rather than every
+        // item still sitting in the queue from earlier runs.
+        val handled = mutableSetOf<String>()
+
+        while (true) {
+            val next = DownloadBus.nextQueued()
+            if (next == null) {
+                // A late enqueue can land just as we finish; give it a moment.
+                delay(GRACE_MILLIS)
+                if (DownloadBus.nextQueued() != null) continue
+
+                // Snapshot the start id *before* looking at the queue. If a new start
+                // lands after this read, stopSelfResult sees a newer id and refuses; if
+                // it landed before, then the enqueue (which always precedes the start
+                // request) is already visible in the queue check below.
+                val startIdSnapshot = lastStartId
+                val mayStop = synchronized(workerLock) {
+                    !DownloadBus.queue.value.any { it.isActive } && stopSelfResult(startIdSnapshot)
+                }
+                if (!mayStop) continue
+
+                reportSummary(handled)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                return
+            }
+
+            handled.add(next.id)
+            DownloadBus.update(next.id) {
+                it.copy(
+                    status = JobStatus.RUNNING,
+                    phase = JobPhase.PREPARING,
+                    progress = -1f,
+                    etaSeconds = -1L,
+                    detail = null,
+                    note = null,
+                    error = null,
+                    errorKind = null,
+                )
+            }
+            // The item can be removed while we were marking it running.
+            if (DownloadBus.queue.value.none { it.id == next.id }) continue
+            notifyQueue(force = true)
+            runItem(next)
+        }
+    }
+
+    private fun reportSummary(handled: Set<String>) {
+        val items = DownloadBus.queue.value
+        fun countOf(status: JobStatus) =
+            handled.count { id -> items.firstOrNull { it.id == id }?.status == status }
+
+        val finished = countOf(JobStatus.FINISHED)
+        val failed = countOf(JobStatus.FAILED)
+        if (finished > 0 || failed > 0) notifySummary(finished, failed)
+    }
+
+    private suspend fun runItem(item: QueueItem) {
         val app = applicationContext
-        val folder = SettingsRepository(app).folder.value
+        val settings = SettingsRepository.get(app)
+        val folder = settings.folder.value
+        val trimNonMusic = settings.skipNonMusic.value
         val workDir = File(app.getExternalFilesDir(null) ?: app.filesDir, WORK_DIR)
 
         try {
-            DownloadBus.publish(
-                DownloadUiState(
-                    title = probe.title,
-                    uploader = probe.uploader,
-                    thumbnailUrl = probe.thumbnailUrl,
-                    format = format,
-                    progress = -1f,
-                    etaSeconds = -1L,
-                    phase = DownloadUiState.Phase.PREPARING,
-                    detail = getString(R.string.engine_setup),
-                )
-            )
-
             YtDlpEngine.ensureReady(app)
+            throwIfCanceled(item.id)
 
-            if (workDir.exists()) workDir.deleteRecursively()
-            workDir.mkdirs()
-
-            val request = YoutubeDLRequest(url).apply {
-                addOption("--no-playlist")
-                addOption("--no-mtime")
-                addOption("--newline")
-                addOption("-o", File(workDir, "%(title)s.%(ext)s").absolutePath)
-                addOption("-x")
-                format.ytDlpAudioFormat?.let { addOption("--audio-format", it) }
-                format.audioQuality?.let { addOption("--audio-quality", it) }
-                addOption("--embed-metadata")
-                if (format != AudioFormat.ORIGINAL) {
-                    // Cover art only makes sense in the formats that support it, and
-                    // ORIGINAL is meant to come through untouched.
-                    addOption("--embed-thumbnail")
-                    addOption("--convert-thumbnails", "jpg")
+            var resolved = item
+            if (resolved.title.isBlank()) {
+                YtDlpEngine.probeSingle(app, resolved.url)?.let { info ->
+                    resolved = resolved.copy(
+                        title = info.title,
+                        uploader = info.uploader,
+                        thumbnailUrl = info.thumbnailUrl,
+                        durationSeconds = info.durationSeconds,
+                    )
+                    DownloadBus.update(resolved.id) {
+                        it.copy(
+                            title = info.title,
+                            uploader = info.uploader,
+                            thumbnailUrl = info.thumbnailUrl,
+                            durationSeconds = info.durationSeconds,
+                        )
+                    }
+                    notifyQueue(force = true)
                 }
+                throwIfCanceled(item.id)
             }
 
-            val processId = "convert-${UUID.randomUUID()}"
-            DownloadBus.setProcessId(processId)
-            YoutubeDL.execute(request, processId, false) { percent, eta, line ->
-                onEngineLine(percent, eta, line)
-            }
-            DownloadBus.setProcessId(null)
-
-            publish(workDir, format, probe, folder)
+            runWithRepair(resolved, folder, trimNonMusic, workDir)
         } catch (canceled: CancellationException) {
-            DownloadBus.setProcessId(null)
             workDir.deleteRecursively()
-            DownloadBus.publish(null)
+            markCanceled(item.id)
             throw canceled
         } catch (canceled: YoutubeDL.CanceledException) {
-            DownloadBus.setProcessId(null)
             workDir.deleteRecursively()
-            DownloadBus.publish(null)
-            DownloadBus.emit(DownloadEvent.Canceled)
-            finish(getString(R.string.cancel), null)
+            markCanceled(item.id)
+        } catch (canceled: UserCanceledException) {
+            workDir.deleteRecursively()
+            markCanceled(item.id)
+        } catch (failure: JobFailure) {
+            workDir.deleteRecursively()
+            markFailed(item.id, failure.kind, failure.message)
         } catch (t: Throwable) {
-            DownloadBus.setProcessId(null)
-            // Post-processing can fail after the audio itself is already on disk,
-            // so fall back to publishing whatever we managed to produce.
-            if (newestAudioFile(workDir) != null) {
-                publish(workDir, format, probe, folder)
-            } else {
+            workDir.deleteRecursively()
+            markFailed(item.id, YtDlpEngine.classify(t.message), t.message)
+        }
+    }
+
+    /**
+     * Runs the download, and on a stale-extractor failure updates yt-dlp once and
+     * retries. YouTube breaks older yt-dlp builds every few months, and without this
+     * the app just dies with a cryptic message until someone updates it by hand.
+     */
+    private suspend fun runWithRepair(
+        item: QueueItem,
+        folder: String,
+        trimNonMusic: Boolean,
+        workDir: File,
+    ) {
+        var repaired = false
+        while (true) {
+            try {
+                download(item, trimNonMusic, workDir)
+                publish(workDir, item, folder)
+                return
+            } catch (canceled: YoutubeDL.CanceledException) {
+                throw canceled
+            } catch (canceled: UserCanceledException) {
+                throw canceled
+            } catch (t: Throwable) {
+                val kind = YtDlpEngine.classify(t.message)
+                if (repaired || kind != FailureKind.STALE_EXTRACTOR) {
+                    // An update we already ran did not help, so do not tell the user to
+                    // update the engine a second time.
+                    throw JobFailure(if (repaired) FailureKind.UNKNOWN else kind, t.message)
+                }
+
+                repaired = true
+                DownloadBus.update(item.id) {
+                    it.copy(
+                        phase = JobPhase.REPAIRING,
+                        note = getString(R.string.phase_repairing),
+                        detail = null,
+                    )
+                }
+                notifyQueue(force = true)
+
+                if (!YtDlpEngine.updateEngine(applicationContext)) {
+                    throw JobFailure(FailureKind.STALE_EXTRACTOR, getString(R.string.engine_repair_failed))
+                }
+
+                // The partial download is useless now; start the item over.
                 workDir.deleteRecursively()
-                DownloadBus.publish(null)
-                DownloadBus.emit(
-                    DownloadEvent.Failed(t.message?.takeIf { it.isNotBlank() } ?: t.javaClass.simpleName)
-                )
-                finish(getString(R.string.notif_failed), null)
+                workDir.mkdirs()
+                DownloadBus.update(item.id) {
+                    it.copy(phase = JobPhase.PREPARING, note = getString(R.string.engine_repaired))
+                }
+                notifyQueue(force = true)
+                throwIfCanceled(item.id)
             }
         }
     }
 
-    private suspend fun publish(workDir: File, format: AudioFormat, probe: ProbeInfo, folder: String) {
+    private fun download(item: QueueItem, trimNonMusic: Boolean, workDir: File) {
+        if (workDir.exists()) workDir.deleteRecursively()
+        workDir.mkdirs()
+
+        val request = YoutubeDLRequest(item.url)
+        request.addOption("-o", File(workDir, "%(title)s.%(ext)s").absolutePath)
+        YtDlpEngine.applyAudioOptions(request, item.format, trimNonMusic)
+
+        // Last chance to abort before the process actually exists: after this point the
+        // only way out is killing it, which needs the id to be registered already.
+        throwIfCanceled(item.id)
+
+        val processId = DownloadBus.processIdFor(item.id)
+        DownloadBus.setProcessId(processId)
+        try {
+            YoutubeDL.execute(request, processId, false) { percent, eta, line ->
+                onEngineLine(item.id, percent, eta, line)
+            }
+        } finally {
+            DownloadBus.setProcessId(null)
+        }
+    }
+
+    private suspend fun publish(workDir: File, item: QueueItem, folder: String) {
         val app = applicationContext
         val produced = newestAudioFile(workDir)
 
         if (produced == null) {
             workDir.deleteRecursively()
-            DownloadBus.publish(null)
-            DownloadBus.emit(DownloadEvent.Failed(getString(R.string.notif_failed)))
-            finish(getString(R.string.notif_failed), null)
+            markFailed(item.id, FailureKind.UNKNOWN, null)
             return
         }
 
         val published = MediaPublisher.publish(app, produced, folder)
         workDir.deleteRecursively()
-        DownloadBus.publish(null)
 
         if (published == null) {
-            DownloadBus.emit(DownloadEvent.Failed(getString(R.string.notif_failed)))
-            finish(getString(R.string.notif_failed), null)
+            markFailed(item.id, FailureKind.UNKNOWN, null)
             return
         }
 
         val record = DownloadRecord(
             id = published.fileName,
-            title = probe.title,
-            uploader = probe.uploader,
-            thumbnailUrl = probe.thumbnailUrl,
-            formatName = format.name,
+            title = item.title.ifBlank { published.fileName },
+            uploader = item.uploader,
+            thumbnailUrl = item.thumbnailUrl,
+            formatName = item.format.name,
             uri = published.uri,
             fileName = published.fileName,
             mimeType = published.mimeType,
             sizeBytes = published.sizeBytes,
-            durationSeconds = probe.durationSeconds,
+            durationSeconds = item.durationSeconds,
             createdAt = System.currentTimeMillis(),
         )
-        HistoryRepository(app).add(record)
-        DownloadBus.emit(DownloadEvent.Finished(record))
-        finish(record.title, record.uri to record.mimeType)
+        HistoryRepository.get(app).add(record)
+        DownloadBus.update(item.id) {
+            it.copy(
+                status = JobStatus.FINISHED,
+                phase = JobPhase.CONVERTING,
+                progress = 1f,
+                etaSeconds = -1L,
+                detail = null,
+                note = null,
+            )
+        }
+        notifyQueue(force = true)
+    }
+
+    private fun markCanceled(id: String) {
+        DownloadBus.update(id) {
+            it.copy(status = JobStatus.CANCELED, progress = -1f, detail = null, note = null)
+        }
+        notifyQueue(force = true)
+    }
+
+    private fun markFailed(id: String, kind: FailureKind, message: String?) {
+        DownloadBus.update(id) {
+            it.copy(
+                status = JobStatus.FAILED,
+                progress = -1f,
+                detail = null,
+                note = null,
+                errorKind = kind,
+                error = message?.takeIf { text -> text.isNotBlank() }?.take(300),
+            )
+        }
+        notifyQueue(force = true)
+    }
+
+    private fun throwIfCanceled(id: String) {
+        if (DownloadBus.isCanceled(id)) throw UserCanceledException()
     }
 
     private fun newestAudioFile(dir: File): File? = dir.listFiles()
         ?.filter { MediaPublisher.isAudioFile(it) }
         ?.maxByOrNull { it.lastModified() }
 
-    private fun onEngineLine(percent: Float, eta: Long, line: String) {
-        val current = DownloadBus.active.value ?: return
+    private fun onEngineLine(itemId: String, percent: Float, eta: Long, line: String) {
+        val current = DownloadBus.queue.value.firstOrNull { it.id == itemId } ?: return
+
         val marker = CONVERT_MARKERS.any { line.startsWith(it) }
         val phase = when {
-            marker -> DownloadUiState.Phase.CONVERTING
+            current.phase == JobPhase.REPAIRING -> JobPhase.REPAIRING
+            marker -> JobPhase.CONVERTING
             // Post-processing is terminal: yt-dlp keeps echoing the stale download
             // percentage, so never let that pull the label back.
-            current.phase == DownloadUiState.Phase.CONVERTING -> DownloadUiState.Phase.CONVERTING
-            line.startsWith("[download]") || percent >= 0f -> DownloadUiState.Phase.DOWNLOADING
+            current.phase == JobPhase.CONVERTING -> JobPhase.CONVERTING
+            line.startsWith("[download]") || percent >= 0f -> JobPhase.DOWNLOADING
             else -> current.phase
         }
         val fraction = if (percent in 0f..100f) percent / 100f else -1f
 
-        DownloadBus.publish(
-            current.copy(
+        DownloadBus.update(itemId) {
+            it.copy(
                 progress = fraction,
                 etaSeconds = eta,
                 phase = phase,
-                detail = line.trim().take(120).takeIf { it.isNotEmpty() },
-            )
-        )
-
-        val bucket = (fraction * 100f).roundToInt()
-        if (bucket != lastNotifiedBucket) {
-            lastNotifiedBucket = bucket
-            val state = DownloadBus.active.value ?: return
-            val detail = buildString {
-                when (state.phase) {
-                    DownloadUiState.Phase.PREPARING -> append(getString(R.string.engine_setup))
-                    DownloadUiState.Phase.CONVERTING -> append(getString(R.string.converting))
-                    DownloadUiState.Phase.DOWNLOADING -> {
-                        if (bucket >= 0) append("$bucket%")
-                        if (state.etaSeconds > 0) {
-                            if (isNotEmpty()) append(" · ")
-                            append("${state.etaSeconds}s")
-                        }
-                    }
-                }
-            }.takeIf { it.isNotEmpty() }
-            manager().notify(
-                NOTIFICATION_PROGRESS,
-                buildProgressNotification(state.title, fraction, detail),
+                detail = line.trim().take(120).takeIf { text -> text.isNotEmpty() },
+                // A repair note should stop taking over the status line as soon as
+                // real output resumes.
+                note = if (marker || line.startsWith("[download]")) null else it.note,
             )
         }
+        notifyQueue()
     }
 
-    /** Tears down the foreground state and posts the final, dismissable result. */
-    private fun finish(title: String, open: Pair<String, String>?) {
-        val intent = if (open != null) {
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(Uri.parse(open.first), open.second)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        } else {
-            Intent(this, MainActivity::class.java)
+    /** Throttled: only redraw the notification when the visible text would change. */
+    private fun notifyQueue(force: Boolean = false) {
+        // Nothing running means we are about to tear down; the summary notification
+        // owns the end state, so do not overwrite it with a stale "Converting".
+        val running = DownloadBus.firstRunning() ?: return
+        val queued = DownloadBus.queue.value.count { it.status == JobStatus.QUEUED }
+        val bucket = running.progress.takeIf { it >= 0f }?.times(100)?.roundToInt() ?: -1
+        val key = "${running.id}:$bucket:$queued:${running.phase}:${running.note}"
+        if (!force && key == lastNotificationKey) return
+        lastNotificationKey = key
+
+        val text = buildString {
+            append(
+                running.note
+                    ?: when {
+                        running.phase == JobPhase.REPAIRING -> getString(R.string.phase_repairing)
+                        running.phase == JobPhase.CONVERTING -> getString(R.string.converting)
+                        running.phase == JobPhase.PREPARING -> getString(R.string.engine_setup)
+                        running.progress >= 0f -> "${(running.progress * 100).roundToInt()}%"
+                        else -> getString(R.string.downloading)
+                    }
+            )
+            if (queued > 0) append(" · +").append(queued)
+        }.take(120)
+
+        manager().notify(
+            NOTIFICATION_PROGRESS,
+            buildProgressNotification(running.title, running.progress, text),
+        )
+    }
+
+    private fun notifySummary(saved: Int, failed: Int) {
+        val text = when {
+            failed == 0 -> getString(R.string.summary_saved, saved)
+            saved == 0 -> getString(R.string.notif_failed)
+            else -> getString(R.string.summary_mixed, saved, failed)
         }
         val content = PendingIntent.getActivity(
             this,
             REQUEST_OPEN,
-            intent,
+            Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(if (open != null) R.drawable.ic_check else R.drawable.ic_info)
-            .setContentTitle(title)
-            .setContentText(getString(if (open != null) R.string.notif_done else R.string.notif_failed))
+            .setSmallIcon(if (failed == 0) R.drawable.ic_check else R.drawable.ic_info)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(text)
             .setAutoCancel(true)
             .setContentIntent(content)
             .build()
-
         manager().notify(NOTIFICATION_RESULT, notification)
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     private fun buildProgressNotification(title: String, progress: Float, detail: String?): Notification {
@@ -297,7 +447,7 @@ class DownloadService : Service() {
         val cancel = PendingIntent.getService(
             this,
             REQUEST_CANCEL,
-            Intent(this, DownloadService::class.java).setAction(ACTION_CANCEL),
+            Intent(this, DownloadService::class.java).setAction(ACTION_CANCEL_CURRENT),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
@@ -335,18 +485,11 @@ class DownloadService : Service() {
         private const val NOTIFICATION_RESULT = 1002
         private const val REQUEST_OPEN = 10
         private const val REQUEST_CANCEL = 11
-
         private const val WORK_DIR = "work"
+        private const val GRACE_MILLIS = 400L
 
-        private const val ACTION_START = "com.ytconverter.action.START"
-        private const val ACTION_CANCEL = "com.ytconverter.action.CANCEL"
-
-        private const val EXTRA_URL = "url"
-        private const val EXTRA_FORMAT = "format"
-        private const val EXTRA_TITLE = "title"
-        private const val EXTRA_UPLOADER = "uploader"
-        private const val EXTRA_THUMBNAIL = "thumbnail"
-        private const val EXTRA_DURATION = "duration"
+        private const val ACTION_ENQUEUE = "com.ytconverter.action.ENQUEUE"
+        private const val ACTION_CANCEL_CURRENT = "com.ytconverter.action.CANCEL_CURRENT"
 
         private val CONVERT_MARKERS = listOf(
             "[ExtractAudio]",
@@ -354,17 +497,13 @@ class DownloadService : Service() {
             "[Metadata]",
             "[EmbedThumbnail]",
             "[ThumbnailsConvertor]",
+            "[SponsorBlock]",
+            "[ModifyChapters]",
         )
 
-        fun start(context: Context, url: String, format: AudioFormat, probe: ProbeInfo?) {
-            val intent = Intent(context, DownloadService::class.java)
-                .setAction(ACTION_START)
-                .putExtra(EXTRA_URL, url)
-                .putExtra(EXTRA_FORMAT, format.name)
-                .putExtra(EXTRA_TITLE, probe?.title ?: url)
-                .putExtra(EXTRA_UPLOADER, probe?.uploader)
-                .putExtra(EXTRA_THUMBNAIL, probe?.thumbnailUrl)
-                .putExtra(EXTRA_DURATION, probe?.durationSeconds ?: 0L)
+        /** Starts the queue processor if it is not already running. */
+        fun ensureRunning(context: Context) {
+            val intent = Intent(context, DownloadService::class.java).setAction(ACTION_ENQUEUE)
             ContextCompat.startForegroundService(context, intent)
         }
     }

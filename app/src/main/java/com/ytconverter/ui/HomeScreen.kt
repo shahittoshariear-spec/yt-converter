@@ -3,21 +3,39 @@ package com.ytconverter.ui
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,15 +43,16 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -45,43 +64,61 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.ytconverter.R
 import com.ytconverter.data.AudioFormat
 import com.ytconverter.data.DownloadRecord
-import com.ytconverter.downloader.DownloadUiState
-import com.ytconverter.ui.theme.Mint
-import com.ytconverter.ui.theme.Violet
+import com.ytconverter.downloader.FailureKind
+import com.ytconverter.downloader.JobPhase
+import com.ytconverter.downloader.JobStatus
+import com.ytconverter.downloader.QueueItem
+import com.ytconverter.ui.theme.LocalBrandPalette
+import kotlinx.coroutines.delay
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -95,11 +132,17 @@ fun HomeScreen(
     val url by viewModel.url.collectAsStateWithLifecycle()
     val format by viewModel.format.collectAsStateWithLifecycle()
     val downloads by viewModel.items.collectAsStateWithLifecycle()
-    val active by viewModel.active.collectAsStateWithLifecycle()
+    val queue by viewModel.queue.collectAsStateWithLifecycle()
+    val resolving by viewModel.resolving.collectAsStateWithLifecycle()
     val folder by viewModel.folder.collectAsStateWithLifecycle()
+    val playlistHint by viewModel.playlistHint.collectAsStateWithLifecycle()
 
     val snackbarHost = remember { SnackbarHostState() }
     var showSettings by remember { mutableStateOf(false) }
+    // Sections that have already animated in, so scrolling back does not replay it.
+    val seenSections = remember { mutableSetOf<String>() }
+
+    val working = queue.any { it.isActive }
 
     LaunchedEffect(Unit) { onRequestNotificationPermission() }
     LaunchedEffect(Unit) { viewModel.prefillFromClipboardIfLink() }
@@ -114,20 +157,30 @@ fun HomeScreen(
                 Brush.verticalGradient(
                     colors = listOf(
                         MaterialTheme.colorScheme.background,
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        MaterialTheme.colorScheme.surfaceContainerLow,
                     )
                 )
             )
     ) {
+        AmbientBackground(alive = working, modifier = Modifier.matchParentSize())
+
         Scaffold(
             containerColor = Color.Transparent,
             topBar = {
                 TopAppBar(
                     title = {
-                        Text(
-                            text = stringResource(R.string.app_name),
-                            fontWeight = FontWeight.Bold,
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = stringResource(R.string.app_name),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            ShariearTag(
+                                textStyle = MaterialTheme.typography.labelSmall,
+                                glowRadius = 8.dp,
+                                pulsing = false,
+                            )
+                        }
                     },
                     navigationIcon = { BrandMark() },
                     actions = {
@@ -156,42 +209,83 @@ fun HomeScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 item("link") {
-                    LinkCard(
-                        url = url,
-                        enabled = active == null,
-                        onUrlChange = viewModel::onUrlChange,
-                        onPaste = viewModel::pasteFromClipboard,
-                        onClear = viewModel::clearUrl,
-                        onSubmit = viewModel::start,
-                    )
-                }
-
-                item("format") {
-                    FormatCard(selected = format, onSelect = viewModel::onFormatChange)
-                }
-
-                item("convert") {
-                    ConvertButton(
-                        enabled = active == null && url.isNotBlank(),
-                        busy = active != null,
-                        onClick = viewModel::start,
-                    )
-                }
-
-                active?.let { state ->
-                    item("active") {
-                        ActiveCard(state = state, onCancel = viewModel::cancel)
+                    StaggeredAppear("link", seenSections, 0) {
+                        LinkCard(
+                            url = url,
+                            enabled = !resolving,
+                            onUrlChange = viewModel::onUrlChange,
+                            onPaste = viewModel::pasteFromClipboard,
+                            onClear = viewModel::clearUrl,
+                            onSubmit = viewModel::start,
+                        )
                     }
                 }
 
-                item("header") {
+                item("format") {
+                    StaggeredAppear("format", seenSections, 1) {
+                        FormatCard(selected = format, onSelect = viewModel::onFormatChange)
+                    }
+                }
+
+                item("convert") {
+                    StaggeredAppear("convert", seenSections, 2) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            ConvertButton(
+                                enabled = url.isNotBlank() && !resolving,
+                                busy = resolving,
+                                onClick = viewModel::start,
+                            )
+                            if (playlistHint) {
+                                TextButton(
+                                    onClick = viewModel::startWithPlaylist,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_playlist_add),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(stringResource(R.string.playlist_add))
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (queue.isNotEmpty()) {
+                    item("queue-header") {
+                        SectionHeader(
+                            title = stringResource(R.string.queue_title),
+                            action = when {
+                                queue.any { it.isActive } -> stringResource(R.string.queue_cancel_all) to viewModel::cancelAll
+                                queue.any { !it.isActive } -> stringResource(R.string.queue_clear_finished) to viewModel::clearFinished
+                                else -> null
+                            },
+                        )
+                    }
+                    items(queue, key = { it.id }) { item ->
+                        QueueRow(
+                            item = item,
+                            onCancel = { viewModel.cancelItem(item.id) },
+                            onRetry = { viewModel.retry(item.id) },
+                            modifier = Modifier.animateItem(),
+                        )
+                    }
+                }
+
+                item("downloads-header") {
                     SectionHeader(
                         title = stringResource(R.string.recent),
-                        onClearAll = if (downloads.isNotEmpty()) viewModel::clearAll else null,
+                        action = if (downloads.isNotEmpty()) {
+                            stringResource(R.string.clear_all) to viewModel::clearAll
+                        } else {
+                            null
+                        },
                     )
                 }
 
-                if (downloads.isEmpty()) {
+                if (downloads.isEmpty() && queue.isEmpty()) {
                     item("empty") { EmptyState() }
                 } else {
                     items(downloads, key = { it.id }) { record ->
@@ -200,6 +294,7 @@ fun HomeScreen(
                             onOpen = { openRecord(context, record) },
                             onShare = { shareRecord(context, record) },
                             onDelete = { viewModel.delete(record) },
+                            modifier = Modifier.animateItem(),
                         )
                     }
                 }
@@ -214,21 +309,202 @@ fun HomeScreen(
     }
 }
 
+/**
+ * Two soft colour washes behind everything. They only drift while the queue is busy,
+ * so an idle screen costs nothing to keep on screen.
+ */
+@Composable
+private fun AmbientBackground(alive: Boolean, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val drift = if (alive) {
+        val transition = rememberInfiniteTransition(label = "ambient")
+        transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 16000, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "drift",
+        ).value
+    } else {
+        0.45f
+    }
+
+    Box(
+        modifier = modifier.drawBehind {
+            val radius = size.maxDimension * 0.75f
+            drawRect(
+                brush = Brush.radialGradient(
+                    colors = listOf(colors.primary.copy(alpha = 0.18f), Color.Transparent),
+                    center = Offset(size.width * (0.10f + 0.22f * drift), size.height * 0.02f),
+                    radius = radius,
+                )
+            )
+            drawRect(
+                brush = Brush.radialGradient(
+                    colors = listOf(colors.secondary.copy(alpha = 0.14f), Color.Transparent),
+                    center = Offset(size.width * (0.96f - 0.25f * drift), size.height * 0.28f),
+                    radius = radius,
+                )
+            )
+        }
+    )
+}
+
+/**
+ * Fades and lifts a section into place, so the screen assembles instead of appearing.
+ *
+ * [seen] is hoisted above the list because items are disposed when scrolled away, and
+ * without it the entrance would replay on every scroll back.
+ */
+@Composable
+private fun StaggeredAppear(
+    key: String,
+    seen: MutableSet<String>,
+    index: Int,
+    content: @Composable () -> Unit,
+) {
+    val alreadySeen = key in seen
+    var visible by remember { mutableStateOf(alreadySeen) }
+    LaunchedEffect(key) {
+        if (!alreadySeen) {
+            delay(70L * index)
+            seen.add(key)
+            visible = true
+        }
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(320)) + slideInVertically(tween(380)) { height -> height / 5 },
+    ) {
+        content()
+    }
+}
+
+/**
+ * The one card style used across the screen.
+ *
+ * `surfaceContainer` plus a hairline outline is what gives every panel an edge in
+ * dark mode; at the default one-dp elevation the Material tint is far too weak to
+ * separate a card from the background.
+ */
+@Composable
+private fun AppCard(
+    modifier: Modifier = Modifier,
+    shape: Shape = MaterialTheme.shapes.large,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = shape,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        border = BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+        ),
+        content = content,
+    )
+}
+
+private const val PULSE_CYCLES = 3
+private const val PULSE_MIN = 0.55f
+
+/**
+ * The family signature, in gradient text on a pill with a pulsing bloom.
+ *
+ * `Modifier.blur` only works on API 31+, so the inner radial bloom is drawn on every
+ * version and the outward halo is a bonus on newer devices.
+ *
+ * The pulse is finite: this tag also sits permanently in the top bar, and an endless
+ * animation there would keep redrawing the screen forever. It lights up a few times
+ * and then settles. [pulsing] is false for the always-visible copy.
+ */
+@Composable
+private fun ShariearTag(
+    modifier: Modifier = Modifier,
+    textStyle: TextStyle = MaterialTheme.typography.labelLarge,
+    glowRadius: Dp = 16.dp,
+    pulsing: Boolean = true,
+) {
+    val brand = LocalBrandPalette.current
+    val shape = RoundedCornerShape(percent = 50)
+    val gradient = Brush.linearGradient(listOf(brand.gradientStart, brand.gradientEnd))
+
+    val glow = remember { Animatable(1f) }
+    LaunchedEffect(pulsing) {
+        if (!pulsing) return@LaunchedEffect
+        repeat(PULSE_CYCLES) {
+            glow.animateTo(PULSE_MIN, tween(durationMillis = 1400, easing = LinearEasing))
+            glow.animateTo(1f, tween(durationMillis = 1400, easing = LinearEasing))
+        }
+    }
+    val pulseValue = glow.value
+
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .graphicsLayer { alpha = pulseValue }
+                .blur(glowRadius, edgeTreatment = BlurredEdgeTreatment.Unbounded)
+                .background(gradient, shape)
+        )
+        Box(
+            modifier = Modifier
+                .clip(shape)
+                .background(gradient)
+                .padding(1.5.dp)
+                .background(brand.signatureFill, shape)
+                .drawBehind {
+                    drawRect(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                brand.gradientStart.copy(alpha = 0.34f * pulseValue),
+                                brand.gradientEnd.copy(alpha = 0.14f * pulseValue),
+                                Color.Transparent,
+                            ),
+                            center = center,
+                            radius = size.maxDimension * 0.62f,
+                        )
+                    )
+                }
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = stringResource(R.string.signature),
+                style = textStyle.copy(
+                    brush = gradient,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 1.4.sp,
+                ),
+            )
+        }
+    }
+}
+
 @Composable
 private fun BrandMark() {
+    val brand = LocalBrandPalette.current
     Box(
         modifier = Modifier
             .padding(start = 20.dp, end = 6.dp)
-            .size(34.dp)
+            .size(32.dp)
             .clip(MaterialTheme.shapes.extraSmall)
-            .background(Brush.linearGradient(listOf(Violet, Mint))),
+            .background(Brush.linearGradient(listOf(brand.gradientStart, brand.gradientEnd))),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
             painter = painterResource(R.drawable.ic_note),
             contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier.size(20.dp),
+            tint = brand.onGradient,
+            modifier = Modifier.size(19.dp),
         )
     }
 }
@@ -242,12 +518,7 @@ private fun LinkCard(
     onClear: () -> Unit,
     onSubmit: () -> Unit,
 ) {
-    ElevatedCard(
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+    AppCard {
         OutlinedTextField(
             value = url,
             onValueChange = onUrlChange,
@@ -296,12 +567,7 @@ private fun LinkCard(
 
 @Composable
 private fun FormatCard(selected: AudioFormat, onSelect: (AudioFormat) -> Unit) {
-    ElevatedCard(
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+    AppCard {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -311,25 +577,7 @@ private fun FormatCard(selected: AudioFormat, onSelect: (AudioFormat) -> Unit) {
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(MaterialTheme.shapes.small)
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f))
-                    .padding(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                AudioFormat.entries.forEach { option ->
-                    Segment(
-                        label = stringResource(option.labelRes),
-                        active = option == selected,
-                        onClick = { onSelect(option) },
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-
+            FormatSelector(selected = selected, onSelect = onSelect)
             Text(
                 text = stringResource(selected.blurbRes),
                 style = MaterialTheme.typography.bodyMedium,
@@ -339,58 +587,125 @@ private fun FormatCard(selected: AudioFormat, onSelect: (AudioFormat) -> Unit) {
     }
 }
 
+/** Segmented control whose highlight slides between the options. */
 @Composable
-private fun Segment(
-    label: String,
-    active: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val container by animateColorAsState(
-        targetValue = if (active) MaterialTheme.colorScheme.primary else Color.Transparent,
-        animationSpec = tween(180),
-        label = "segmentContainer",
-    )
-    val contentColor by animateColorAsState(
-        targetValue = if (active) MaterialTheme.colorScheme.onPrimary
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = tween(180),
-        label = "segmentContent",
+private fun FormatSelector(selected: AudioFormat, onSelect: (AudioFormat) -> Unit) {
+    val entries = AudioFormat.entries
+    val density = LocalDensity.current
+    var contentWidthPx by remember { mutableIntStateOf(0) }
+    val segmentPx = if (contentWidthPx > 0) contentWidthPx.toFloat() / entries.size else 0f
+    val index = entries.indexOf(selected).coerceAtLeast(0)
+
+    val offsetPx by animateFloatAsState(
+        targetValue = segmentPx * index,
+        animationSpec = spring(dampingRatio = 0.8f, stiffness = 500f),
+        label = "segmentOffset",
     )
 
     Box(
-        modifier = modifier
-            .clip(MaterialTheme.shapes.extraSmall)
-            .background(container)
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
-        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .padding(4.dp)
+            .onSizeChanged { contentWidthPx = it.width },
     ) {
-        Text(
-            text = label,
-            color = contentColor,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-        )
+        Box(Modifier.matchParentSize()) {
+            if (segmentPx > 0f) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset { IntOffset(offsetPx.roundToInt(), 0) }
+                        .width(with(density) { segmentPx.toDp() })
+                        .fillMaxHeight()
+                        .clip(MaterialTheme.shapes.extraSmall)
+                        .background(MaterialTheme.colorScheme.primary)
+                )
+            }
+        }
+
+        Row(Modifier.fillMaxWidth()) {
+            entries.forEach { entry ->
+                val active = entry == selected
+                val contentColor by animateColorAsState(
+                    targetValue = if (active) MaterialTheme.colorScheme.onPrimary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    animationSpec = tween(180),
+                    label = "segmentLabel",
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(MaterialTheme.shapes.extraSmall)
+                        .clickable { onSelect(entry) }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = stringResource(entry.labelRes),
+                        color = contentColor,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun ConvertButton(enabled: Boolean, busy: Boolean, onClick: () -> Unit) {
+    val brand = LocalBrandPalette.current
+    val shape = MaterialTheme.shapes.medium
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val haptics = LocalHapticFeedback.current
+
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.97f else 1f,
+        animationSpec = spring(dampingRatio = 0.6f, stiffness = 900f),
+        label = "buttonScale",
+    )
+    val contentColor =
+        if (enabled) brand.onGradient else MaterialTheme.colorScheme.onSurfaceVariant
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .height(58.dp)
-            .alpha(if (enabled) 1f else 0.45f)
-            .clip(MaterialTheme.shapes.medium)
-            .background(
-                if (enabled) Brush.horizontalGradient(listOf(Violet, Mint))
-                else SolidColor(MaterialTheme.colorScheme.surfaceVariant)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .shadow(
+                elevation = if (enabled) 14.dp else 0.dp,
+                shape = shape,
+                clip = false,
+                ambientColor = brand.gradientStart,
+                spotColor = brand.gradientEnd,
             )
-            .clickable(enabled = enabled, onClick = onClick),
+            .clip(shape)
+            .background(
+                if (enabled) {
+                    Brush.horizontalGradient(listOf(brand.gradientStart, brand.gradientEnd))
+                } else {
+                    // A flat theme colour, not a faded gradient: dimming the gradient
+                    // used to drop the label to roughly 1:1 contrast.
+                    SolidColor(MaterialTheme.colorScheme.surfaceContainerHighest)
+                }
+            )
+            .clickable(
+                interactionSource = interaction,
+                indication = ripple(),
+                enabled = enabled,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onClick()
+                },
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Row(
@@ -401,19 +716,24 @@ private fun ConvertButton(enabled: Boolean, busy: Boolean, onClick: () -> Unit) 
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
                     strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
+                    color = contentColor,
                 )
             } else {
                 Icon(
                     painter = painterResource(R.drawable.ic_download),
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimary,
+                    tint = contentColor,
                     modifier = Modifier.size(22.dp),
                 )
             }
             Text(
-                text = stringResource(if (busy) R.string.converting else R.string.convert),
-                color = MaterialTheme.colorScheme.onPrimary,
+                text = stringResource(
+                    when {
+                        busy -> R.string.preparing
+                        else -> R.string.convert
+                    }
+                ),
+                color = contentColor,
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -422,96 +742,62 @@ private fun ConvertButton(enabled: Boolean, busy: Boolean, onClick: () -> Unit) 
 }
 
 @Composable
-private fun ActiveCard(state: DownloadUiState, onCancel: () -> Unit) {
-    val context = LocalContext.current
-    val determinate = state.progress >= 0f
-
-    val status = when {
-        state.phase == DownloadUiState.Phase.PREPARING -> context.getString(R.string.engine_setup)
-        state.phase == DownloadUiState.Phase.CONVERTING -> context.getString(R.string.converting)
-        determinate -> buildString {
-            append("${(state.progress * 100).roundToInt()}%")
-            if (state.etaSeconds > 0) append(" · ${state.etaSeconds}s left")
-        }
-
-        else -> context.getString(R.string.downloading)
-    }
-
-    ElevatedCard(
-        shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
+private fun QueueRow(
+    item: QueueItem,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AppCard(shape = MaterialTheme.shapes.medium, modifier = modifier) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                Thumbnail(url = state.thumbnailUrl, width = 84.dp, shape = MaterialTheme.shapes.small)
+                Thumbnail(item.thumbnailUrl, width = 88.dp, shape = MaterialTheme.shapes.small)
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Text(
-                        text = state.title,
-                        style = MaterialTheme.typography.titleSmall,
+                        text = item.title.ifBlank { item.url },
+                        style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    state.uploader?.let { uploader ->
-                        Text(
-                            text = uploader,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    StatusLine(item)
                 }
-                FormatPill(format = state.format)
+                FormatPill(format = item.format)
             }
 
-            if (determinate) {
-                LinearProgressIndicator(
-                    progress = { state.progress.coerceIn(0f, 1f) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(6.dp)
-                        .clip(CircleShape),
-                    color = Violet,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
-            } else {
-                LinearProgressIndicator(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(6.dp)
-                        .clip(CircleShape),
-                    color = Violet,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant,
-                )
+            if (item.isRunning) {
+                LifeProgress(item.progress)
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
+            item.errorKind?.let { kind ->
                 Text(
-                    text = status,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    text = friendlyError(kind),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
-                TextButton(onClick = onCancel) {
-                    Text(stringResource(R.string.cancel))
+            }
+
+            val action: Pair<String, () -> Unit>? = when (item.status) {
+                JobStatus.RUNNING -> stringResource(R.string.cancel) to onCancel
+                JobStatus.QUEUED -> stringResource(R.string.remove) to onCancel
+                JobStatus.FAILED, JobStatus.CANCELED -> stringResource(R.string.retry) to onRetry
+                JobStatus.FINISHED -> null
+            }
+            action?.let { (label, handler) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = handler) { Text(label) }
                 }
             }
         }
@@ -519,21 +805,122 @@ private fun ActiveCard(state: DownloadUiState, onCancel: () -> Unit) {
 }
 
 @Composable
-private fun SectionHeader(title: String, onClearAll: (() -> Unit)?) {
+private fun StatusLine(item: QueueItem, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val color = when (item.status) {
+        JobStatus.FAILED -> colors.error
+        JobStatus.FINISHED -> colors.secondary
+        else -> colors.onSurfaceVariant
+    }
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (item.isRunning) PulsingDot(color = colors.primary)
+        Text(
+            text = queueStatusLine(item),
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun PulsingDot(color: Color, size: Dp = 6.dp) {
+    val transition = rememberInfiniteTransition(label = "dot")
+    val scale by transition.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 1.15f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dotScale",
+    )
+    val alpha by transition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 850),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dotAlpha",
+    )
+    Box(
+        modifier = Modifier
+            .size(size)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                this.alpha = alpha
+            }
+            .clip(CircleShape)
+            .background(color)
+    )
+}
+
+/** Progress that glides to its target instead of jumping between updates. */
+@Composable
+private fun LifeProgress(progress: Float, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    val shape = RoundedCornerShape(50)
+    val bar = modifier
+        .fillMaxWidth()
+        .height(6.dp)
+        .clip(shape)
+
+    if (progress < 0f) {
+        LinearProgressIndicator(
+            modifier = bar,
+            color = colors.primary,
+            trackColor = colors.surfaceContainerHighest,
+        )
+    } else {
+        val animated by animateFloatAsState(
+            targetValue = progress.coerceIn(0f, 1f),
+            animationSpec = tween(durationMillis = 450, easing = LinearEasing),
+            label = "progressFill",
+        )
+        LinearProgressIndicator(
+            progress = { animated },
+            modifier = bar,
+            color = colors.primary,
+            trackColor = colors.surfaceContainerHighest,
+        )
+    }
+}
+
+@Composable
+private fun SectionHeader(title: String, action: Pair<String, () -> Unit>?) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Box(
+            modifier = Modifier
+                .size(width = 3.dp, height = 18.dp)
+                .clip(RoundedCornerShape(50))
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary,
+                            MaterialTheme.colorScheme.secondary,
+                        )
+                    )
+                )
+        )
+        Spacer(Modifier.width(10.dp))
         Text(
             text = title,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f),
         )
-        if (onClearAll != null) {
-            TextButton(onClick = onClearAll) {
-                Text(stringResource(R.string.clear_all))
-            }
+        action?.let { (label, handler) ->
+            TextButton(onClick = handler) { Text(label) }
         }
     }
 }
@@ -544,6 +931,7 @@ private fun DownloadRow(
     onOpen: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val subtitle = listOf(
@@ -552,12 +940,9 @@ private fun DownloadRow(
         formatDuration(record.durationSeconds),
     ).filter { it.isNotEmpty() }.joinToString(" · ")
 
-    ElevatedCard(
+    AppCard(
         shape = MaterialTheme.shapes.medium,
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
-        modifier = Modifier
-            .fillMaxWidth()
+        modifier = modifier
             .clip(MaterialTheme.shapes.medium)
             .clickable(onClick = onOpen),
     ) {
@@ -643,7 +1028,7 @@ private fun Thumbnail(url: String?, width: Dp, shape: Shape) {
             .width(width)
             .aspectRatio(16f / 9f)
             .clip(shape)
-            .background(MaterialTheme.colorScheme.surfaceVariant),
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
         contentAlignment = Alignment.Center,
     ) {
         if (url.isNullOrBlank()) {
@@ -686,28 +1071,11 @@ private fun EmptyState() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 28.dp),
+            .padding(vertical = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(72.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.linearGradient(
-                        listOf(Violet.copy(alpha = 0.18f), Mint.copy(alpha = 0.18f))
-                    )
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_note),
-                contentDescription = null,
-                tint = Violet,
-                modifier = Modifier.size(34.dp),
-            )
-        }
+        ShariearTag(textStyle = MaterialTheme.typography.titleMedium)
         Text(
             text = stringResource(R.string.empty_title),
             style = MaterialTheme.typography.titleSmall,
@@ -747,6 +1115,7 @@ private fun Footer(folder: String) {
 @Composable
 private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
     val folder by viewModel.folder.collectAsStateWithLifecycle()
+    val trimNonMusic by viewModel.trimNonMusic.collectAsStateWithLifecycle()
     val engineStatus by viewModel.engineStatus.collectAsStateWithLifecycle()
     var draft by remember(folder) { mutableStateOf(folder) }
 
@@ -769,6 +1138,24 @@ private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+
+                HorizontalDivider()
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = stringResource(R.string.settings_sponsorblock),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = stringResource(R.string.settings_sponsorblock_help),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(checked = trimNonMusic, onCheckedChange = viewModel::setTrimNonMusic)
+                }
 
                 HorizontalDivider()
 
@@ -822,6 +1209,27 @@ private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
 
                     else -> Unit
                 }
+
+                HorizontalDivider()
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.about_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    ShariearTag(textStyle = MaterialTheme.typography.labelLarge)
+                    Text(
+                        text = stringResource(R.string.about_blurb),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
         },
         confirmButton = {
@@ -836,6 +1244,41 @@ private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
         },
     )
 }
+
+@Composable
+private fun queueStatusLine(item: QueueItem): String {
+    val context = LocalContext.current
+    return when (item.status) {
+        JobStatus.QUEUED -> context.getString(R.string.status_queued)
+        JobStatus.FINISHED -> context.getString(R.string.status_done)
+        JobStatus.CANCELED -> context.getString(R.string.status_canceled)
+        JobStatus.FAILED -> context.getString(R.string.status_failed)
+        JobStatus.RUNNING -> item.note ?: when (item.phase) {
+            JobPhase.PREPARING -> context.getString(R.string.engine_setup)
+            JobPhase.REPAIRING -> context.getString(R.string.phase_repairing)
+            JobPhase.CONVERTING -> context.getString(R.string.converting)
+            JobPhase.DOWNLOADING -> if (item.progress >= 0f) {
+                buildString {
+                    append("${(item.progress * 100).roundToInt()}%")
+                    if (item.etaSeconds > 0) append(" · ${item.etaSeconds}s")
+                }
+            } else {
+                context.getString(R.string.downloading)
+            }
+        }
+    }
+}
+
+@Composable
+private fun friendlyError(kind: FailureKind): String = stringResource(
+    when (kind) {
+        FailureKind.AGE_RESTRICTED -> R.string.err_age_restricted
+        FailureKind.STALE_EXTRACTOR -> R.string.err_stale_engine
+        FailureKind.NETWORK -> R.string.err_network
+        FailureKind.UNAVAILABLE -> R.string.err_unavailable
+        FailureKind.UNKNOWN -> R.string.notif_failed
+    }
+)
 
 private fun openRecord(context: Context, record: DownloadRecord) {
     val intent = Intent(Intent.ACTION_VIEW)

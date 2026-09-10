@@ -6,8 +6,16 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 
-/** Persists the list of finished conversions as a small JSON blob. */
-class HistoryRepository(context: Context) {
+/**
+ * Persists the list of finished conversions as a small JSON blob.
+ *
+ * Deliberately a process-wide singleton: [com.ytconverter.downloader.DownloadService]
+ * is what writes new records while [com.ytconverter.ui.MainViewModel] renders them, and
+ * separate instances would each hold their own [MutableStateFlow] — the list would look
+ * empty until a restart, and a later delete would then write the stale list back over
+ * the fresh record.
+ */
+class HistoryRepository private constructor(context: Context) {
 
     private val prefs =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -47,8 +55,16 @@ class HistoryRepository(context: Context) {
         }.getOrDefault(emptyList())
     }
 
-    private companion object {
-        const val PREFS = "yt_converter_history"
-        const val KEY_ITEMS = "items"
+    companion object {
+        private const val PREFS = "yt_converter_history"
+        private const val KEY_ITEMS = "items"
+
+        @Volatile
+        private var instance: HistoryRepository? = null
+
+        fun get(context: Context): HistoryRepository =
+            instance ?: synchronized(this) {
+                instance ?: HistoryRepository(context.applicationContext).also { instance = it }
+            }
     }
 }
