@@ -90,6 +90,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -178,7 +179,6 @@ fun HomeScreen(
                             ShariearTag(
                                 textStyle = MaterialTheme.typography.labelSmall,
                                 glowRadius = 8.dp,
-                                pulsing = false,
                             )
                         }
                     },
@@ -310,12 +310,18 @@ fun HomeScreen(
 }
 
 /**
- * Two soft colour washes behind everything. They only drift while the queue is busy,
- * so an idle screen costs nothing to keep on screen.
+ * One soft violet wash behind everything, instead of layered violet and green ones.
+ *
+ * Two different hues over a dark background mix towards grey and read as a smear; a
+ * single hue tinted gently from the top just adds depth. It only drifts while the
+ * queue is busy, so an idle screen costs nothing to keep on screen.
  */
 @Composable
 private fun AmbientBackground(alive: Boolean, modifier: Modifier = Modifier) {
     val colors = MaterialTheme.colorScheme
+    val isDark = colors.background.luminance() < 0.5f
+    val wash = if (isDark) 0.13f else 0.07f
+
     val drift = if (alive) {
         val transition = rememberInfiniteTransition(label = "ambient")
         transition.animateFloat(
@@ -328,23 +334,16 @@ private fun AmbientBackground(alive: Boolean, modifier: Modifier = Modifier) {
             label = "drift",
         ).value
     } else {
-        0.45f
+        0.5f
     }
 
     Box(
         modifier = modifier.drawBehind {
-            val radius = size.maxDimension * 0.75f
+            val radius = size.maxDimension * 0.95f
             drawRect(
                 brush = Brush.radialGradient(
-                    colors = listOf(colors.primary.copy(alpha = 0.18f), Color.Transparent),
-                    center = Offset(size.width * (0.10f + 0.22f * drift), size.height * 0.02f),
-                    radius = radius,
-                )
-            )
-            drawRect(
-                brush = Brush.radialGradient(
-                    colors = listOf(colors.secondary.copy(alpha = 0.14f), Color.Transparent),
-                    center = Offset(size.width * (0.96f - 0.25f * drift), size.height * 0.28f),
+                    colors = listOf(colors.primary.copy(alpha = wash), Color.Transparent),
+                    center = Offset(size.width * (0.5f + 0.05f * drift), -size.height * 0.04f),
                     radius = radius,
                 )
             )
@@ -419,24 +418,21 @@ private const val PULSE_MIN = 0.55f
  * `Modifier.blur` only works on API 31+, so the inner radial bloom is drawn on every
  * version and the outward halo is a bonus on newer devices.
  *
- * The pulse is finite: this tag also sits permanently in the top bar, and an endless
- * animation there would keep redrawing the screen forever. It lights up a few times
- * and then settles. [pulsing] is false for the always-visible copy.
+ * The pulse is finite: it lights up when the app opens and then settles, so a screen
+ * that is just sitting there schedules no animation frames at all.
  */
 @Composable
 private fun ShariearTag(
     modifier: Modifier = Modifier,
     textStyle: TextStyle = MaterialTheme.typography.labelLarge,
     glowRadius: Dp = 16.dp,
-    pulsing: Boolean = true,
 ) {
     val brand = LocalBrandPalette.current
     val shape = RoundedCornerShape(percent = 50)
-    val gradient = Brush.linearGradient(listOf(brand.gradientStart, brand.gradientEnd))
+    val gradient = Brush.linearGradient(listOf(brand.accentStart, brand.accentEnd))
 
     val glow = remember { Animatable(1f) }
-    LaunchedEffect(pulsing) {
-        if (!pulsing) return@LaunchedEffect
+    LaunchedEffect(Unit) {
         repeat(PULSE_CYCLES) {
             glow.animateTo(PULSE_MIN, tween(durationMillis = 1400, easing = LinearEasing))
             glow.animateTo(1f, tween(durationMillis = 1400, easing = LinearEasing))
@@ -899,20 +895,6 @@ private fun SectionHeader(title: String, action: Pair<String, () -> Unit>?) {
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(width = 3.dp, height = 18.dp)
-                .clip(RoundedCornerShape(50))
-                .background(
-                    Brush.verticalGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.primary,
-                            MaterialTheme.colorScheme.secondary,
-                        )
-                    )
-                )
-        )
-        Spacer(Modifier.width(10.dp))
         Text(
             text = title,
             style = MaterialTheme.typography.titleMedium,
@@ -1051,17 +1033,19 @@ private fun Thumbnail(url: String?, width: Dp, shape: Shape) {
 
 @Composable
 private fun FormatPill(format: AudioFormat) {
+    // Neutral on purpose: the format is metadata, not a status, so it should not
+    // introduce a second hue next to the violet accent.
     Box(
         modifier = Modifier
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.secondaryContainer)
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
             .padding(horizontal = 10.dp, vertical = 4.dp),
     ) {
         Text(
             text = format.shortName,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -1071,21 +1055,42 @@ private fun EmptyState() {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 24.dp),
+            .padding(top = 8.dp, bottom = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        ShariearTag(textStyle = MaterialTheme.typography.titleMedium)
+        Box(
+            modifier = Modifier
+                .size(88.dp)
+                .clip(MaterialTheme.shapes.large)
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.05f),
+                        )
+                    )
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_note),
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(38.dp),
+            )
+        }
         Text(
             text = stringResource(R.string.empty_title),
-            style = MaterialTheme.typography.titleSmall,
+            style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
             text = stringResource(R.string.empty_body),
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 24.dp),
         )
     }
 }
@@ -1215,14 +1220,18 @@ private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
                         text = stringResource(R.string.about_title),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                     )
-                    ShariearTag(textStyle = MaterialTheme.typography.labelLarge)
+                    Text(
+                        text = stringResource(R.string.about_credit),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Text(
                         text = stringResource(R.string.about_blurb),
                         style = MaterialTheme.typography.labelSmall,
