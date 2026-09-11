@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+/** Whether a queue item is one video, or a whole playlist in a single engine run. */
+enum class JobKind { SINGLE, PLAYLIST }
+
 /** What the engine is doing for a single queue item. */
 enum class JobPhase { PREPARING, DOWNLOADING, CONVERTING, REPAIRING }
 
@@ -41,11 +44,30 @@ data class QueueItem(
      * item and is checked between phases.
      */
     val cancelRequested: Boolean = false,
+    val kind: JobKind = JobKind.SINGLE,
+    /** For a playlist job: which entry is in flight, and how many there are. */
+    val itemIndex: Int = 0,
+    val itemTotal: Int = 0,
+    /** Songs handed to the media library; a playlist reports its total here. */
+    val savedCount: Int = 0,
+    /** Set when a playlist finished having saved only part of itself. */
+    val caveat: String? = null,
     val errorKind: FailureKind? = null,
     val error: String? = null,
 ) {
     val isRunning: Boolean get() = status == JobStatus.RUNNING
     val isActive: Boolean get() = status == JobStatus.QUEUED || status == JobStatus.RUNNING
+
+    /**
+     * A playlist runs as one engine invocation, but yt-dlp reports progress per song,
+     * so the individual percentages are rolled into one figure. Without this the bar
+     * would snap back to zero on every track of a 376-song album.
+     */
+    val displayProgress: Float
+        get() = when {
+            kind != JobKind.PLAYLIST || itemTotal <= 0 -> progress
+            else -> ((itemIndex - 1).coerceAtLeast(0) + progress.coerceIn(0f, 1f)) / itemTotal
+        }
 }
 
 /**

@@ -60,34 +60,6 @@ object YtDlpEngine {
         parseInfo(root)
     }
 
-    /**
-     * Expands a playlist/channel into individual videos.
-     *
-     * `--flat-playlist` keeps this cheap: it skips per-video extraction, at the cost
-     * of not returning thumbnails, which [parseInfo] rebuilds from the video id. The
-     * per-line `--dump-json` form is deliberate rather than `--dump-single-json`: it
-     * is what lets the library's `--ignore-errors` handling tolerate one dead entry in
-     * a playlist instead of failing the whole expansion.
-     */
-    suspend fun expandCollection(context: Context, url: String): List<MediaInfo> =
-        withContext(Dispatchers.IO) {
-            ensureReady(context.applicationContext)
-            val request = YoutubeDLRequest(url).apply {
-                addOption("--dump-json")
-                addOption("--flat-playlist")
-                addOption("--skip-download")
-                addOption("--no-warnings")
-                addOption("--ignore-errors")
-            }
-            val response = YoutubeDL.execute(request, null, false, null)
-            response.out.orEmpty().lineSequence()
-                .map { it.trim() }
-                .filter { it.startsWith("{") }
-                .mapNotNull { line -> runCatching { JSONObject(line) }.getOrNull() }
-                .mapNotNull(::parseInfo)
-                .toList()
-        }
-
     /** Pulls the newest yt-dlp release from GitHub. Returns false on any failure. */
     suspend fun updateEngine(context: Context): Boolean = withContext(Dispatchers.IO) {
         runCatching {
@@ -102,8 +74,17 @@ object YtDlpEngine {
         request: YoutubeDLRequest,
         format: AudioFormat,
         trimNonMusic: Boolean,
+        playlist: Boolean = false,
     ) {
-        request.addOption("--no-playlist")
+        // A playlist is deliberately left to yt-dlp as a single run: one Python start
+        // and one extraction pass instead of one per song, and yt-dlp handles the
+        // pagination and the per-entry retries itself. `--ignore-errors` matters there
+        // so one dead video does not abandon the other 375.
+        if (playlist) {
+            request.addOption("--ignore-errors")
+        } else {
+            request.addOption("--no-playlist")
+        }
         request.addOption("--newline")
         request.addOption("--no-mtime")
         request.addOption("-x")

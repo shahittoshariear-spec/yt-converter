@@ -95,6 +95,9 @@ private val LightScheme = lightColorScheme(
     onError = Color(0xFFFFFFFF),
     errorContainer = Color(0xFFFFDAD6),
     onErrorContainer = Color(0xFF410002),
+    inverseSurface = Color(0xFF1A1A20),
+    inverseOnSurface = Color(0xFFEDEDF3),
+    inversePrimary = Color(0xFF5B45D6),
 )
 
 private val DarkScheme = darkColorScheme(
@@ -128,6 +131,9 @@ private val DarkScheme = darkColorScheme(
     onError = Color(0xFF690005),
     errorContainer = Color(0xFF93000A),
     onErrorContainer = Color(0xFFFFDAD6),
+    inverseSurface = Color(0xFFE8E8ED),
+    inverseOnSurface = Color(0xFF1A1A20),
+    inversePrimary = Color(0xFFA996FF),
 )
 
 private val AppShapes = Shapes(

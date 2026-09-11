@@ -21,8 +21,8 @@ android {
         applicationId = "com.ytconverter"
         minSdk = 29
         targetSdk = 37
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
 
         // Restricts the ABI set for every output, including the universal APK.
         ndk {

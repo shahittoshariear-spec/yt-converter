@@ -28,6 +28,12 @@
     <string name="cancel">Cancel</string>
 
     <string name="playlist_add">Also add the whole playlist</string>
+    <string name="playlist_detected">Playlist detected — every song will download</string>
+    <string name="playlist_song_of">Song %1$d of %2$d</string>
+    <string name="playlist_saved">%1$d songs saved</string>
+    <string name="playlist_partial">Stopped early — %1$d songs were saved</string>
+    <string name="playlist_skipped">%1$d songs could not be saved</string>
+    <string name="playlist_unknown">Playlist</string>
 
     <string name="queue_title">Queue</string>
     <string name="queue_clear_finished">Clear finished</string>

@@ -115,6 +115,7 @@ import com.ytconverter.R
 import com.ytconverter.data.AudioFormat
 import com.ytconverter.data.DownloadRecord
 import com.ytconverter.downloader.FailureKind
+import com.ytconverter.downloader.JobKind
 import com.ytconverter.downloader.JobPhase
 import com.ytconverter.downloader.JobStatus
 import com.ytconverter.downloader.QueueItem
@@ -137,6 +138,7 @@ fun HomeScreen(
     val resolving by viewModel.resolving.collectAsStateWithLifecycle()
     val folder by viewModel.folder.collectAsStateWithLifecycle()
     val playlistHint by viewModel.playlistHint.collectAsStateWithLifecycle()
+    val playlistDetected by viewModel.playlistDetected.collectAsStateWithLifecycle()
 
     val snackbarHost = remember { SnackbarHostState() }
     var showSettings by remember { mutableStateOf(false) }
@@ -166,7 +168,12 @@ fun HomeScreen(
         AmbientBackground(alive = working, modifier = Modifier.matchParentSize())
 
         Scaffold(
+            // Transparent so the gradient and wash behind it show through. The
+            // contentColor must be set explicitly: contentColorFor(Transparent) is
+            // Unspecified, which falls back to LocalContentColor's default of BLACK,
+            // leaving every unstyled Text black — invisible on a dark background.
             containerColor = Color.Transparent,
+            contentColor = MaterialTheme.colorScheme.onBackground,
             topBar = {
                 TopAppBar(
                     title = {
@@ -249,6 +256,28 @@ fun HomeScreen(
                                     Text(stringResource(R.string.playlist_add))
                                 }
                             }
+                        }
+                    }
+                }
+
+                if (playlistDetected) {
+                    item("playlist-detected") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_playlist_add),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Text(
+                                text = stringResource(R.string.playlist_detected),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -771,7 +800,7 @@ private fun QueueRow(
             }
 
             if (item.isRunning) {
-                LifeProgress(item.progress)
+                LifeProgress(item.displayProgress)
             }
 
             item.errorKind?.let { kind ->
@@ -779,6 +808,14 @@ private fun QueueRow(
                     text = friendlyError(kind),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            item.caveat?.let { caveat ->
+                Text(
+                    text = caveat,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -1257,23 +1294,50 @@ private fun SettingsDialog(viewModel: MainViewModel, onDismiss: () -> Unit) {
 @Composable
 private fun queueStatusLine(item: QueueItem): String {
     val context = LocalContext.current
+    val playlist = item.kind == JobKind.PLAYLIST
     return when (item.status) {
         JobStatus.QUEUED -> context.getString(R.string.status_queued)
-        JobStatus.FINISHED -> context.getString(R.string.status_done)
-        JobStatus.CANCELED -> context.getString(R.string.status_canceled)
-        JobStatus.FAILED -> context.getString(R.string.status_failed)
-        JobStatus.RUNNING -> item.note ?: when (item.phase) {
-            JobPhase.PREPARING -> context.getString(R.string.engine_setup)
-            JobPhase.REPAIRING -> context.getString(R.string.phase_repairing)
-            JobPhase.CONVERTING -> context.getString(R.string.converting)
-            JobPhase.DOWNLOADING -> if (item.progress >= 0f) {
-                buildString {
-                    append("${(item.progress * 100).roundToInt()}%")
-                    if (item.etaSeconds > 0) append(" · ${item.etaSeconds}s")
-                }
-            } else {
-                context.getString(R.string.downloading)
+        JobStatus.FINISHED -> if (playlist && item.savedCount > 0) {
+            context.getString(R.string.playlist_saved, item.savedCount)
+        } else {
+            context.getString(R.string.status_done)
+        }
+
+        JobStatus.CANCELED -> if (playlist && item.savedCount > 0) {
+            context.getString(R.string.playlist_saved, item.savedCount)
+        } else {
+            context.getString(R.string.status_canceled)
+        }
+        JobStatus.FAILED -> if (playlist && item.savedCount > 0) {
+            context.getString(R.string.playlist_saved, item.savedCount)
+        } else {
+            context.getString(R.string.status_failed)
+        }
+
+        JobStatus.RUNNING -> item.note ?: when {
+            playlist && item.itemIndex > 0 -> buildString {
+                append(
+                    context.getString(
+                        R.string.playlist_song_of,
+                        item.itemIndex,
+                        item.itemTotal,
+                    )
+                )
+                if (item.progress >= 0f) append(" · ${(item.progress * 100).roundToInt()}%")
             }
+
+            playlist && item.savedCount > 0 ->
+                context.getString(R.string.playlist_saved, item.savedCount)
+
+            item.phase == JobPhase.PREPARING -> context.getString(R.string.engine_setup)
+            item.phase == JobPhase.REPAIRING -> context.getString(R.string.phase_repairing)
+            item.phase == JobPhase.CONVERTING -> context.getString(R.string.converting)
+            item.progress >= 0f -> buildString {
+                append("${(item.progress * 100).roundToInt()}%")
+                if (item.etaSeconds > 0) append(" · ${item.etaSeconds}s")
+            }
+
+            else -> context.getString(R.string.downloading)
         }
     }
 }

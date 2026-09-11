@@ -40,4 +40,13 @@ enum class AudioFormat(
             FLAC -> "FLAC"
             ORIGINAL -> "SRC"
         }
+
+    /**
+     * Extension a finished file should carry, or null when the source container is
+     * kept as-is. Used to avoid handing over a pre-conversion leftover (for example a
+     * `.webm` still sitting in the work directory after an interrupted ffmpeg run)
+     * as if it were the requested format.
+     */
+    val targetExtension: String?
+        get() = ytDlpAudioFormat
 }

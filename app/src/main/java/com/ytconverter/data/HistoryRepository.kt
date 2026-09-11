@@ -27,6 +27,16 @@ class HistoryRepository private constructor(context: Context) {
         listOf(record) + current.filterNot { it.id == record.id }
     }
 
+    /**
+     * Adds many at once. A 300-song playlist would otherwise re-serialise and rewrite
+     * the whole blob once per song.
+     */
+    fun addAll(records: List<DownloadRecord>) {
+        if (records.isEmpty()) return
+        val ids = records.mapTo(mutableSetOf()) { it.id }
+        mutate { current -> records + current.filterNot { it.id in ids } }
+    }
+
     fun remove(id: String) = mutate { current -> current.filterNot { it.id == id } }
 
     fun clear() = mutate { emptyList() }

@@ -12,6 +12,7 @@ import com.ytconverter.data.HistoryRepository
 import com.ytconverter.data.SettingsRepository
 import com.ytconverter.downloader.DownloadBus
 import com.ytconverter.downloader.DownloadService
+import com.ytconverter.downloader.JobKind
 import com.ytconverter.downloader.JobPhase
 import com.ytconverter.downloader.JobStatus
 import com.ytconverter.downloader.MediaInfo
@@ -62,6 +63,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         .map { isCollectionLink(it) && it.contains("v=", ignoreCase = true) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    /** True when the link is a playlist or channel in its own right. */
+    val playlistDetected: StateFlow<Boolean> = _url
+        .map { isCollectionLink(it) && !it.contains("v=", ignoreCase = true) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     val queue: StateFlow<List<QueueItem>> = DownloadBus.queue
     val items: StateFlow<List<DownloadRecord>> = history.items
     val folder: StateFlow<String> = settings.folder
@@ -94,7 +100,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             links.size == 1 -> _url.value = links.first()
             else -> {
                 val chosen = _format.value
-                enqueue(links.map { queueItem(it, chosen, null) })
+                enqueue(links.map { queueItemFor(it, chosen) })
                 _url.value = ""
                 emit(text(R.string.enqueued_many, links.size))
             }
@@ -114,7 +120,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         // A `watch?v=..&list=..` URL defaults to the single video; the playlist is an
         // explicit extra at the user's request.
-        resolveAndEnqueue(link, expandCollection = isCollectionLink(link) && !link.contains("v=", true))
+        if (isCollectionLink(link) && !link.contains("v=", ignoreCase = true)) {
+            enqueuePlaylist(link)
+        } else {
+            enqueueSingle(link)
+        }
     }
 
     fun startWithPlaylist() {
@@ -122,39 +132,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             emit(text(R.string.bad_url))
             return
         }
-        resolveAndEnqueue(link, expandCollection = true)
+        enqueuePlaylist(link)
     }
 
-    private fun resolveAndEnqueue(link: String, expandCollection: Boolean) {
+    /** One video, probed first so its card is populated the moment it is queued. */
+    private fun enqueueSingle(link: String) {
         if (_resolving.value) return
         _resolving.value = true
         viewModelScope.launch {
             try {
                 val chosen = _format.value
-                val items = withContext(Dispatchers.IO) {
-                    if (expandCollection) {
-                        val expanded = runCatching { YtDlpEngine.expandCollection(app, link) }
-                            .getOrDefault(emptyList())
-                            .map { queueItem(it.url, chosen, it) }
-                        // A failed expansion still queues the original link, so the
-                        // queue explains what went wrong instead of the tap doing nothing.
-                        expanded.ifEmpty { listOf(queueItem(link, chosen, null)) }
-                    } else {
-                        val info = runCatching { YtDlpEngine.probeSingle(app, link) }.getOrNull()
-                        listOf(queueItem(link, chosen, info))
-                    }
+                val info = withContext(Dispatchers.IO) {
+                    runCatching { YtDlpEngine.probeSingle(app, link) }.getOrNull()
                 }
-
-                enqueue(items)
+                enqueue(listOf(queueItem(link, chosen, info)))
                 _url.value = ""
-                emit(
-                    if (items.size == 1) text(R.string.enqueued_one)
-                    else text(R.string.enqueued_many, items.size)
-                )
+                emit(text(R.string.enqueued_one))
             } finally {
                 _resolving.value = false
             }
         }
+    }
+
+    /**
+     * A whole playlist is one engine run rather than hundreds of queue entries: yt-dlp
+     * walks the list itself, so it costs one interpreter start instead of one per song,
+     * and it handles pagination and per-entry retries internally.
+     *
+     * There is deliberately no metadata pass up front. The engine reports the playlist
+     * name and the song count from its own output, so a 376-song list starts
+     * immediately instead of after an extra sweep of the whole playlist.
+     */
+    private fun enqueuePlaylist(link: String) {
+        enqueue(
+            listOf(
+                QueueItem(
+                    id = UUID.randomUUID().toString(),
+                    url = link,
+                    format = _format.value,
+                    kind = JobKind.PLAYLIST,
+                )
+            )
+        )
+        _url.value = ""
+        emit(text(R.string.enqueued_one))
     }
 
     fun cancelItem(id: String) {
@@ -190,8 +211,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 phase = JobPhase.PREPARING,
                 progress = -1f,
                 etaSeconds = -1L,
+                itemIndex = 0,
+                itemTotal = 0,
+                savedCount = 0,
                 detail = null,
                 note = null,
+                caveat = null,
                 cancelRequested = false,
                 error = null,
                 errorKind = null,
@@ -254,6 +279,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         thumbnailUrl = info?.thumbnailUrl,
         durationSeconds = info?.durationSeconds ?: 0L,
     )
+
+    /**
+     * Batch paste has no metadata pass, so a collection link is queued as a playlist
+     * job directly. Otherwise `--no-playlist` would quietly fetch only the first
+     * video of every playlist URL in the pasted text.
+     */
+    private fun queueItemFor(url: String, format: AudioFormat): QueueItem =
+        if (isCollectionLink(url) && !url.contains("v=", ignoreCase = true)) {
+            QueueItem(
+                id = UUID.randomUUID().toString(),
+                url = url,
+                format = format,
+                kind = JobKind.PLAYLIST,
+            )
+        } else {
+            queueItem(url, format, null)
+        }
 
     /** Trims punctuation that often trails a link in shared or wrapped text. */
     private fun cleanLink(raw: String): String =
